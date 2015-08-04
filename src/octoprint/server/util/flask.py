@@ -11,12 +11,15 @@ import flask
 import flask.ext.login
 import flask.ext.principal
 import flask.ext.assets
+import webassets.updater
+import webassets.utils
 import functools
 import time
 import uuid
 import threading
 import logging
 import netaddr
+import os
 
 from octoprint.settings import settings
 import octoprint.server
@@ -139,7 +142,66 @@ def fix_webassets_cache():
 			os.remove(temp_filename)
 			raise
 
+	def fixed_get(self, key):
+		import os
+		import errno
+		import warnings
+		from webassets.cache import make_md5
+
+		try:
+			hash = make_md5(self.V, key)
+		except IOError as e:
+			if e.errno != errno.ENOENT:
+				raise
+			return None
+
+		filename = os.path.join(self.directory, '%s' % hash)
+		try:
+			f = open(filename, 'rb')
+		except IOError as e:
+			if e.errno != errno.ENOENT:
+				raise
+			return None
+		try:
+			result = f.read()
+		finally:
+			f.close()
+
+		unpickled = webassets.cache.safe_unpickle(result)
+		if unpickled is None:
+			warnings.warn('Ignoring corrupted cache file %s' % filename)
+		return unpickled
+
 	cache.FilesystemCache.set = fixed_set
+	cache.FilesystemCache.get = fixed_get
+
+def fix_webassets_filtertool():
+	from webassets.merge import FilterTool, log, MemoryHunk
+
+	error_logger = logging.getLogger(__name__ + ".fix_webassets_filtertool")
+
+	def fixed_wrap_cache(self, key, func):
+		"""Return cache value ``key``, or run ``func``.
+		"""
+		if self.cache:
+			if not self.no_cache_read:
+				log.debug('Checking cache for key %s', key)
+				content = self.cache.get(key)
+				if not content in (False, None):
+					log.debug('Using cached result for %s', key)
+					return MemoryHunk(content)
+
+		try:
+			content = func().getvalue()
+			if self.cache:
+				log.debug('Storing result in cache with key %s', key,)
+				self.cache.set(key, content)
+			return MemoryHunk(content)
+		except:
+			error_logger.exception("Got an exception while trying to apply filter, ignoring file")
+			return MemoryHunk("")
+
+	FilterTool._wrap_cache = fixed_wrap_cache
 
 #~~ passive login helper
 
@@ -182,7 +244,7 @@ def passive_login():
 
 _cache = SimpleCache()
 
-def cached(timeout=5 * 60, key=lambda: "view/%s" % flask.request.path, unless=None, refreshif=None):
+def cached(timeout=5 * 60, key=lambda: "view/%s" % flask.request.path, unless=None, refreshif=None, unless_response=None):
 	def decorator(f):
 		@functools.wraps(f)
 		def decorated_function(*args, **kwargs):
@@ -211,6 +273,11 @@ def cached(timeout=5 * 60, key=lambda: "view/%s" % flask.request.path, unless=No
 			logger.debug("No cache entry or refreshing cache for {path}, calling wrapped function".format(path=flask.request.path))
 			rv = f(*args, **kwargs)
 
+			# do not store if the "unless_response" condition is true
+			if callable(unless_response) and unless_response(rv):
+				logger.debug("Not caching result for {path}, bypassed".format(path=flask.request.path))
+				return rv
+
 			# store it in the cache
 			_cache.set(cache_key, rv, timeout=timeout)
 
@@ -222,6 +289,23 @@ def cached(timeout=5 * 60, key=lambda: "view/%s" % flask.request.path, unless=No
 
 def cache_check_headers():
 	return "no-cache" in flask.request.cache_control or "no-cache" in flask.request.pragma
+
+def cache_check_response_headers(response):
+	if not isinstance(response, flask.Response):
+		return False
+
+	headers = response.headers
+
+	if "Cache-Control" in headers and "no-cache" in headers["Cache-Control"]:
+		return True
+
+	if "Pragma" in headers and "no-cache" in headers["Pragma"]:
+		return True
+
+	if "Expires" in headers and headers["Expires"] in ("0", "-1"):
+		return True
+
+	return False
 
 #~~ access validators for use with tornado
 
@@ -269,7 +353,7 @@ def _get_flask_user_from_request(request):
 	from octoprint.settings import settings
 
 	apikey = octoprint.server.util.get_api_key(request)
-	if settings().get(["api", "enabled"]) and apikey is not None:
+	if settings().getBoolean(["api", "enabled"]) and apikey is not None:
 		user = octoprint.server.util.get_user_for_apikey(apikey)
 	else:
 		user = flask.ext.login.current_user
@@ -459,9 +543,51 @@ class PluginAssetResolver(flask.ext.assets.FlaskResolver):
 		import os
 		return os.path.normpath(os.path.join(ctx.environment.directory, target))
 
+##~~ Webassets updater that takes changes in the configuration into account
+
+class SettingsCheckUpdater(webassets.updater.BaseUpdater):
+
+	updater = "always"
+
+	def __init__(self):
+		self._delegate = webassets.updater.get_updater(self.__class__.updater)
+
+	def needs_rebuild(self, bundle, ctx):
+		return self._delegate.needs_rebuild(bundle, ctx) or self.changed_settings(ctx)
+
+	def changed_settings(self, ctx):
+		import json
+
+		if not ctx.cache:
+			return False
+
+		cache_key = ('octo', 'settings')
+		current_hash = webassets.utils.hash_func(json.dumps(settings().effective_yaml))
+		cached_hash = ctx.cache.get(cache_key)
+		# This may seem counter-intuitive, but if no cache entry is found
+		# then we actually return "no update needed". This is because
+		# otherwise if no cache / a dummy cache is used, then we would be
+		# rebuilding every single time.
+		if not cached_hash is None:
+			return cached_hash != current_hash
+		return False
+
+	def build_done(self, bundle, ctx):
+		import json
+
+		self._delegate.build_done(bundle, ctx)
+		if not ctx.cache:
+			return
+
+		cache_key = ('octo', 'settings')
+		cache_value = webassets.utils.hash_func(json.dumps(settings().effective_yaml))
+		ctx.cache.set(cache_key, cache_value)
+
 ##~~ plugin assets collector
 
 def collect_plugin_assets(enable_gcodeviewer=True, enable_timelapse=True, preferred_stylesheet="css"):
+	logger = logging.getLogger(__name__ + ".collect_plugin_assets")
+
 	supported_stylesheets = ("css", "less")
 	assets = dict(
 		js=[],
@@ -504,14 +630,29 @@ def collect_plugin_assets(enable_gcodeviewer=True, enable_timelapse=True, prefer
 	asset_plugins = octoprint.plugin.plugin_manager().get_implementations(octoprint.plugin.AssetPlugin)
 	for implementation in asset_plugins:
 		name = implementation._identifier
-		all_assets = implementation.get_assets()
+		try:
+			all_assets = implementation.get_assets()
+			basefolder = implementation.get_asset_folder()
+		except:
+			logger.exception("Got an error while trying to collect assets from {}, ignoring assets from the plugin".format(name))
+			continue
+
+		def asset_exists(category, asset):
+			exists = os.path.exists(os.path.join(basefolder, asset))
+			if not exists:
+				logger.warn("Plugin {} is referring to non existing {} asset {}".format(name, category, asset))
+			return exists
 
 		if "js" in all_assets:
 			for asset in all_assets["js"]:
+				if not asset_exists("js", asset):
+					continue
 				assets["js"].append('plugin/{name}/{asset}'.format(**locals()))
 
 		if preferred_stylesheet in all_assets:
 			for asset in all_assets[preferred_stylesheet]:
+				if not asset_exists(preferred_stylesheet, asset):
+					continue
 				assets[preferred_stylesheet].append('plugin/{name}/{asset}'.format(**locals()))
 		else:
 			for stylesheet in supported_stylesheets:
@@ -519,6 +660,8 @@ def collect_plugin_assets(enable_gcodeviewer=True, enable_timelapse=True, prefer
 					continue
 
 				for asset in all_assets[stylesheet]:
+					if not asset_exists(stylesheet, asset):
+						continue
 					assets[stylesheet].append('plugin/{name}/{asset}'.format(**locals()))
 				break
 

@@ -338,10 +338,11 @@ class BundleTranslation(Command):
 
 
 class PackTranslation(Command):
-	description = "bundles translations"
+	description = "creates language packs for translations"
 	user_options = [
-		('locale=', 'l', 'locale for the translation to bundle'),
-		('author=', 'a', 'author of the translation')
+		('locale=', 'l', 'locale for the translation to pack'),
+		('author=', 'a', 'author of the translation'),
+		('target=', 't', 'target folder for the pack')
 	]
 	boolean_options = []
 
@@ -367,6 +368,7 @@ class PackTranslation(Command):
 	def initialize_options(self):
 		self.locale = None
 		self.author = None
+		self.target = None
 
 	def finalize_options(self):
 		if self.locale is None:
@@ -383,7 +385,10 @@ class PackTranslation(Command):
 
 		now = datetime.datetime.utcnow().replace(microsecond=0)
 
-		zip_path = os.path.join(self.__class__.source_dir, "{prefix}{locale}_{date}.zip".format(prefix=self.__class__.pack_name_prefix, locale=locale, date=now.strftime("%Y%m%d%H%M%S")))
+		if self.target is None:
+			self.target = self.__class__.source_dir
+
+		zip_path = os.path.join(self.target, "{prefix}{locale}_{date}.zip".format(prefix=self.__class__.pack_name_prefix, locale=locale, date=now.strftime("%Y%m%d%H%M%S")))
 		print("Packing translation to {zip_path}".format(**locals()))
 
 		def add_recursively(zip, path, prefix):
@@ -437,14 +442,25 @@ def get_babel_commandclasses(pot_file=None,
 
 
 def create_plugin_setup_parameters(identifier="todo", name="TODO", version="0.1", description="TODO", author="TODO",
-                                   mail="todo@example.com", url="TODO", license="AGPLv3", additional_data=None,
-                                   requires=None, extra_requires=None, cmdclass=None, eggs=None):
+                                   mail="todo@example.com", url="TODO", license="AGPLv3", source_folder=".", additional_data=None,
+                                   additional_packages=None, ignored_packages=None, requires=None, extra_requires=None,
+                                   cmdclass=None, eggs=None, package=None, dependency_links=None):
 	import pkg_resources
 
-	package = "octoprint_{identifier}".format(**locals())
+	if package is None:
+		package = "octoprint_{identifier}".format(**locals())
 
 	if additional_data is None:
 		additional_data = list()
+
+	if additional_packages is None:
+		additional_packages = list()
+
+	if ignored_packages is None:
+		ignored_packages = list()
+
+	if dependency_links is None:
+		dependency_links = list()
 
 	if requires is None:
 		requires = ["OctoPrint"]
@@ -473,14 +489,18 @@ def create_plugin_setup_parameters(identifier="todo", name="TODO", version="0.1"
 		eggs = [egg] + eggs
 
 	cmdclass.update(dict(
-		clean=CleanCommand.for_options(source_folder=package, eggs=eggs)
+		clean=CleanCommand.for_options(source_folder=os.path.join(source_folder, package), eggs=eggs)
 	))
 
-	translation_dir = os.path.join("translations")
+	translation_dir = os.path.join(source_folder, "translations")
 	pot_file = os.path.join(translation_dir, "messages.pot")
-	bundled_dir = os.path.join(package, "translations")
+	bundled_dir = os.path.join(source_folder, package, "translations")
 	if os.path.isdir(translation_dir) and os.path.isfile(pot_file):
 		cmdclass.update(get_babel_commandclasses(pot_file=pot_file, output_dir=translation_dir, bundled_dir=bundled_dir, pack_name_prefix="{name}-i18n-".format(**locals()), pack_path_prefix="_plugins/{identifier}/".format(**locals())))
+
+	from setuptools import find_packages
+	packages = list(set([package] + filter(lambda x: x.startswith("{package}.".format(package=package)), find_packages(where=source_folder, exclude=ignored_packages)) + additional_packages))
+	print("Found packages: {packages!r}".format(**locals()))
 
 	return dict(
 		name=name,
@@ -495,10 +515,10 @@ def create_plugin_setup_parameters(identifier="todo", name="TODO", version="0.1"
 		cmdclass=cmdclass,
 
 		# we only have our plugin package to install
-		packages=[package],
+		packages=packages,
 
 		# we might have additional data files in sub folders that need to be installed too
-		package_data={package: package_data_dirs(package, ["static", "templates", "translations"] + additional_data)},
+		package_data={package: package_data_dirs(os.path.join(source_folder, package), ["static", "templates", "translations"] + additional_data)},
 		include_package_data=True,
 
 		# If you have any package data that needs to be accessible on the file system, such as templates or static assets
@@ -507,6 +527,7 @@ def create_plugin_setup_parameters(identifier="todo", name="TODO", version="0.1"
 
 		install_requires=requires,
 		extras_require=extra_requires,
+		dependency_links=dependency_links,
 
 		# Hook the plugin into the "octoprint.plugin" entry point, mapping the plugin_identifier to the plugin_package.
 		# That way OctoPrint will be able to find the plugin and load it.

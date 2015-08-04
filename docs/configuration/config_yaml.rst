@@ -366,6 +366,27 @@ Use the following settings to add shell/gcode commands to be executed on certain
          type: gcode
          enabled: False
 
+.. note::
+
+   For debugging purposes, you can also add an additional property ``debug`` to your event subscription definitions
+   that if set to true will make the event handler print a log line with your subscription's command after performing
+   all placeholder replacements. Example:
+
+   .. code-block:: yaml
+
+      events:
+        subscriptions:
+        - event: Startup
+          command: "logger 'OctoPrint started up'"
+          type: system
+          debug: true
+
+   This will be logged in OctoPrint's logfile as
+
+   .. code-block:: none
+
+      Executing System Command: logger 'OctoPrint started up'
+
 .. _sec-configuration-config_yaml-feature:
 
 Feature
@@ -600,7 +621,8 @@ Use the following settings to configure the server:
 .. code-block:: yaml
 
    server:
-     # Use this option to define the host to which to bind the server, defaults to "0.0.0.0" (= all interfaces)
+     # Use this option to define the host to which to bind the server, defaults to "0.0.0.0" (= all
+     # interfaces)
      host: 0.0.0.0
 
      # Use this option to define the port to which to bind the server, defaults to 5000
@@ -669,6 +691,18 @@ Use the following settings to configure the server:
 
      # Maximum size of requests other than file uploads in bytes, defaults to 100KB.
      maxSize: 102400
+
+     # Commands to restart/shutdown octoprint or the system it's running on
+     commands:
+
+       # Command to restart OctoPrint, defaults to being unset
+       serverRestartCommand: sudo service octoprint restart
+
+       # Command to restart the system OctoPrint is running on, defaults to being unset
+       systemRestartCommand: sudo shutdown -r now
+
+       # Command to shut down the system OctoPrint is running on, defaults to being unset
+       systemShutdownCommand: sudo shutdown -h now
 
 
 .. note::

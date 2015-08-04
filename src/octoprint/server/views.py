@@ -21,7 +21,9 @@ import logging
 _logger = logging.getLogger(__name__)
 
 @app.route("/")
-@util.flask.cached(refreshif=lambda: util.flask.cache_check_headers() or "_refresh" in request.values, key=lambda: "view/%s/%s" % (request.path, g.locale))
+@util.flask.cached(refreshif=lambda: util.flask.cache_check_headers() or "_refresh" in request.values,
+                   key=lambda: "view/%s/%s" % (request.path, g.locale),
+                   unless_response=util.flask.cache_check_response_headers)
 def index():
 
 	#~~ a bunch of settings
@@ -32,67 +34,6 @@ def index():
 	enable_accesscontrol = userManager is not None
 	preferred_stylesheet = settings().get(["devel", "stylesheet"])
 	locales = dict((l.language, dict(language=l.language, display=l.display_name, english=l.english_name)) for l in LOCALES)
-
-	#~~ prepare assets
-
-	supported_stylesheets = ("css", "less")
-	assets = dict(
-		js=[],
-		stylesheets=[]
-	)
-	assets["js"] = [
-		url_for('static', filename='js/app/viewmodels/appearance.js'),
-		url_for('static', filename='js/app/viewmodels/connection.js'),
-		url_for('static', filename='js/app/viewmodels/control.js'),
-		url_for('static', filename='js/app/viewmodels/firstrun.js'),
-		url_for('static', filename='js/app/viewmodels/files.js'),
-		url_for('static', filename='js/app/viewmodels/loginstate.js'),
-		url_for('static', filename='js/app/viewmodels/navigation.js'),
-		url_for('static', filename='js/app/viewmodels/printerstate.js'),
-		url_for('static', filename='js/app/viewmodels/printerprofiles.js'),
-		url_for('static', filename='js/app/viewmodels/settings.js'),
-		url_for('static', filename='js/app/viewmodels/slicing.js'),
-		url_for('static', filename='js/app/viewmodels/temperature.js'),
-		url_for('static', filename='js/app/viewmodels/terminal.js'),
-		url_for('static', filename='js/app/viewmodels/users.js'),
-		url_for('static', filename='js/app/viewmodels/log.js'),
-		url_for('static', filename='js/app/viewmodels/usersettings.js')
-	]
-	if enable_gcodeviewer:
-		assets["js"] += [
-			url_for('static', filename='js/app/viewmodels/gcode.js'),
-			url_for('static', filename='gcodeviewer/js/ui.js'),
-			url_for('static', filename='gcodeviewer/js/gCodeReader.js'),
-			url_for('static', filename='gcodeviewer/js/renderer.js')
-		]
-	if enable_timelapse:
-		assets["js"].append(url_for('static', filename='js/app/viewmodels/timelapse.js'))
-
-	if preferred_stylesheet == "less":
-		assets["stylesheets"].append(("less", url_for('static', filename='less/octoprint.less')))
-	elif preferred_stylesheet == "css":
-		assets["stylesheets"].append(("css", url_for('static', filename='css/octoprint.css')))
-
-	asset_plugins = pluginManager.get_implementations(octoprint.plugin.AssetPlugin)
-	for implementation in asset_plugins:
-		name = implementation._identifier
-		all_assets = implementation.get_assets()
-
-		if "js" in all_assets:
-			for asset in all_assets["js"]:
-				assets["js"].append(url_for('plugin_assets', name=name, filename=asset))
-
-		if preferred_stylesheet in all_assets:
-			for asset in all_assets[preferred_stylesheet]:
-				assets["stylesheets"].append((preferred_stylesheet, url_for('plugin_assets', name=name, filename=asset)))
-		else:
-			for stylesheet in supported_stylesheets:
-				if not stylesheet in all_assets:
-					continue
-
-				for asset in all_assets[stylesheet]:
-					assets["stylesheets"].append((stylesheet, url_for('plugin_assets', name=name, filename=asset)))
-				break
 
 	##~~ prepare templates
 
@@ -121,10 +62,9 @@ def index():
 	hooks = pluginManager.get_hooks("octoprint.ui.web.templatetypes")
 	for name, hook in hooks.items():
 		try:
-			result = hook(dict(template_rules))
+			result = hook(dict(template_sorting), dict(template_rules))
 		except:
-			# TODO
-			pass
+			_logger.exception("Error while retrieving custom template type definitions from plugin {name}".format(**locals()))
 		else:
 			if not isinstance(result, list):
 				continue
@@ -210,6 +150,7 @@ def index():
 		folders=(gettext("Folders"), dict(template="dialogs/settings/folders.jinja2", _div="settings_folders", custom_bindings=False)),
 		appearance=(gettext("Appearance"), dict(template="dialogs/settings/appearance.jinja2", _div="settings_appearance", custom_bindings=False)),
 		logs=(gettext("Logs"), dict(template="dialogs/settings/logs.jinja2", _div="settings_logs")),
+		server=(gettext("Server"), dict(template="dialogs/settings/server.jinja2", _div="settings_server", custom_bindings=False)),
 	)
 	if enable_accesscontrol:
 		templates["settings"]["entries"]["accesscontrol"] = (gettext("Access Control"), dict(template="dialogs/settings/accesscontrol.jinja2", _div="settings_users", custom_bindings=False))
@@ -232,16 +173,20 @@ def index():
 		name = implementation._identifier
 		plugin_names.add(name)
 
-		vars = implementation.get_template_vars()
+		try:
+			vars = implementation.get_template_vars()
+			configs = implementation.get_template_configs()
+		except:
+			_logger.exception("Error while retrieving template data for plugin {}, ignoring it".format(name))
+			continue
+
 		if not isinstance(vars, dict):
 			vars = dict()
+		if not isinstance(configs, (list, tuple)):
+			configs = []
 
 		for var_name, var_value in vars.items():
 			plugin_vars["plugin_" + name + "_" + var_name] = var_value
-
-		configs = implementation.get_template_configs()
-		if not isinstance(configs, (list, tuple)):
-			configs = []
 
 		includes = _process_template_configs(name, implementation, configs, template_rules)
 
@@ -302,12 +247,13 @@ def index():
 
 	#~~ prepare full set of template vars for rendering
 
+	first_run = settings().getBoolean(["server", "firstRun"]) and (userManager is None or not userManager.hasBeenCustomized())
 	render_kwargs = dict(
 		webcamStream=settings().get(["webcam", "stream"]),
 		enableTemperatureGraph=settings().get(["feature", "temperatureGraph"]),
 		enableAccessControl=userManager is not None,
 		enableSdSupport=settings().get(["feature", "sdSupport"]),
-		firstRun=settings().getBoolean(["server", "firstRun"]) and (userManager is None or not userManager.hasBeenCustomized()),
+		firstRun=first_run,
 		debug=debug,
 		version=VERSION,
 		display_version=DISPLAY_VERSION,
@@ -315,7 +261,6 @@ def index():
 		gcodeThreshold=settings().get(["gcodeViewer", "sizeThreshold"]),
 		uiApiKey=UI_API_KEY,
 		templates=templates,
-		assets=assets,
 		pluginNames=plugin_names,
 		locales=locales
 	)
@@ -323,10 +268,20 @@ def index():
 
 	#~~ render!
 
-	return render_template(
+	import datetime
+
+	response = make_response(render_template(
 		"index.jinja2",
 		**render_kwargs
-	)
+	))
+	response.headers["Last-Modified"] = datetime.datetime.now()
+
+	if first_run:
+		response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, post-check=0, pre-check=0, max-age=0"
+		response.headers["Pragma"] = "no-cache"
+		response.headers["Expires"] = "-1"
+
+	return response
 
 
 def _process_template_configs(name, implementation, configs, rules):
@@ -365,6 +320,8 @@ def _process_template_configs(name, implementation, configs, rules):
 					app.jinja_env.get_or_select_template(data["template"])
 				except TemplateNotFound:
 					pass
+				except:
+					_logger.exception("Error in template {}, not going to include it".format(data["template"]))
 				else:
 					includes[template_type].append(rule["to_entry"](data))
 
@@ -486,7 +443,8 @@ def localeJs(locale, domain):
 		domain=domain
 	)
 
-	return render_template("i18n.js.jinja2", catalog=catalog)
+	from flask import Response
+	return Response(render_template("i18n.js.jinja2", catalog=catalog), content_type="application/x-javascript; charset=utf-8")
 
 
 @app.route("/plugin_assets/<string:name>/<path:filename>")

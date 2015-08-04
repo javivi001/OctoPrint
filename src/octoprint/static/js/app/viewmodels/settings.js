@@ -6,6 +6,10 @@ $(function() {
         self.users = parameters[1];
         self.printerProfiles = parameters[2];
 
+        self.receiving = ko.observable(false);
+        self.sending = ko.observable(false);
+        self.callbacks = [];
+
         self.api_enabled = ko.observable(undefined);
         self.api_key = ko.observable(undefined);
         self.api_allowCrossOrigin = ko.observable(undefined);
@@ -113,6 +117,7 @@ $(function() {
         self.feature_repetierTargetTemp = ko.observable(undefined);
         self.feature_disableExternalHeatupDetection = ko.observable(undefined);
         self.feature_keyboardControl = ko.observable(undefined);
+        self.feature_pollWatched = ko.observable(undefined);
 
         self.serial_port = ko.observable();
         self.serial_baudrate = ko.observable();
@@ -147,6 +152,10 @@ $(function() {
         self.system_actions = ko.observableArray([]);
 
         self.terminalFilters = ko.observableArray([]);
+
+        self.server_commands_systemShutdownCommand = ko.observable(undefined);
+        self.server_commands_systemRestartCommand = ko.observable(undefined);
+        self.server_commands_serverRestartCommand = ko.observable(undefined);
 
         self.settings = undefined;
 
@@ -246,19 +255,47 @@ $(function() {
             return false;
         };
 
+        self.hide = function() {
+            self.settingsDialog.modal("hide");
+        };
+
         self.showTranslationManager = function() {
             self.translationManagerDialog.modal();
             return false;
         };
 
         self.requestData = function(callback) {
+            if (self.receiving()) {
+                if (callback) {
+                    self.callbacks.push(callback);
+                }
+                return;
+            }
+
+            self.receiving(true);
             $.ajax({
                 url: API_BASEURL + "settings",
                 type: "GET",
                 dataType: "json",
                 success: function(response) {
-                    self.fromResponse(response);
-                    if (callback) callback();
+                    var callbacks = self.callbacks;
+                    self.callbacks = [];
+
+                    if (callback) {
+                        callbacks.push(callback);
+                    }
+
+                    try {
+                        self.fromResponse(response);
+                        _.each(callbacks, function(cb) {
+                            cb();
+                        });
+                    } finally {
+                        self.receiving(false);
+                    }
+                },
+                error: function(xhr) {
+                    self.receiving(false);
                 }
             });
         };
@@ -373,6 +410,7 @@ $(function() {
             self.feature_repetierTargetTemp(response.feature.repetierTargetTemp);
             self.feature_disableExternalHeatupDetection(!response.feature.externalHeatupDetection);
             self.feature_keyboardControl(response.feature.keyboardControl);
+            self.feature_pollWatched(response.feature.pollWatched);
 
             self.serial_port(response.serial.port);
             self.serial_baudrate(response.serial.baudrate);
@@ -409,90 +447,106 @@ $(function() {
             self.system_actions(response.system.actions);
 
             self.terminalFilters(response.terminalFilters);
+
+            self.server_commands_systemShutdownCommand(response.server.commands.systemShutdownCommand);
+            self.server_commands_systemRestartCommand(response.server.commands.systemRestartCommand);
+            self.server_commands_serverRestartCommand(response.server.commands.serverRestartCommand);
         };
 
-        self.saveData = function () {
+        self.saveData = function (data, successCallback) {
             self.settingsDialog.trigger("beforeSave");
 
-            var data = ko.mapping.toJS(self.settings);
+            if (data == undefined) {
+                // we only set sending to true when we didn't include data
+                self.sending(true);
+                data = ko.mapping.toJS(self.settings);
 
-            data = _.extend(data, {
-                "api" : {
-                    "enabled": self.api_enabled(),
-                    "key": self.api_key(),
-                    "allowCrossOrigin": self.api_allowCrossOrigin()
-                },
-                "appearance" : {
-                    "name": self.appearance_name(),
-                    "color": self.appearance_color(),
-                    "colorTransparent": self.appearance_colorTransparent(),
-                    "defaultLanguage": self.appearance_defaultLanguage()
-                },
-                "printer": {
-                    "defaultExtrusionLength": self.printer_defaultExtrusionLength()
-                },
-                "webcam": {
-                    "streamUrl": self.webcam_streamUrl(),
-                    "snapshotUrl": self.webcam_snapshotUrl(),
-                    "ffmpegPath": self.webcam_ffmpegPath(),
-                    "bitrate": self.webcam_bitrate(),
-                    "ffmpegThreads": self.webcam_ffmpegThreads(),
-                    "watermark": self.webcam_watermark(),
-                    "flipH": self.webcam_flipH(),
-                    "flipV": self.webcam_flipV(),
-                    "rotate90": self.webcam_rotate90()
-                },
-                "feature": {
-                    "gcodeViewer": self.feature_gcodeViewer(),
-                    "temperatureGraph": self.feature_temperatureGraph(),
-                    "waitForStart": self.feature_waitForStart(),
-                    "alwaysSendChecksum": self.feature_alwaysSendChecksum(),
-                    "sdSupport": self.feature_sdSupport(),
-                    "sdAlwaysAvailable": self.feature_sdAlwaysAvailable(),
-                    "swallowOkAfterResend": self.feature_swallowOkAfterResend(),
-                    "repetierTargetTemp": self.feature_repetierTargetTemp(),
-                    "externalHeatupDetection": !self.feature_disableExternalHeatupDetection(),
-                    "keyboardControl": self.feature_keyboardControl()
-                },
-                "serial": {
-                    "port": self.serial_port(),
-                    "baudrate": self.serial_baudrate(),
-                    "autoconnect": self.serial_autoconnect(),
-                    "timeoutConnection": self.serial_timeoutConnection(),
-                    "timeoutDetection": self.serial_timeoutDetection(),
-                    "timeoutCommunication": self.serial_timeoutCommunication(),
-                    "timeoutTemperature": self.serial_timeoutTemperature(),
-                    "timeoutSdStatus": self.serial_timeoutSdStatus(),
-                    "log": self.serial_log(),
-                    "additionalPorts": commentableLinesToArray(self.serial_additionalPorts()),
-                    "longRunningCommands": splitTextToArray(self.serial_longRunningCommands(), ",", true)
-                },
-                "folder": {
-                    "uploads": self.folder_uploads(),
-                    "timelapse": self.folder_timelapse(),
-                    "timelapseTmp": self.folder_timelapseTmp(),
-                    "logs": self.folder_logs(),
-                    "watched": self.folder_watched()
-                },
-                "temperature": {
-                    "profiles": self.temperature_profiles(),
-                    "cutoff": self.temperature_cutoff()
-                },
-                "system": {
-                    "actions": self.system_actions()
-                },
-                "terminalFilters": self.terminalFilters(),
-                "scripts": {
-                    "gcode": {
-                        "beforePrintStarted": self.scripts_gcode_beforePrintStarted(),
-                        "afterPrintDone": self.scripts_gcode_afterPrintDone(),
-                        "afterPrintCancelled": self.scripts_gcode_afterPrintCancelled(),
-                        "afterPrintPaused": self.scripts_gcode_afterPrintPaused(),
-                        "beforePrintResumed": self.scripts_gcode_beforePrintResumed(),
-                        "afterPrinterConnected": self.scripts_gcode_afterPrinterConnected()
+                data = _.extend(data, {
+                    "api" : {
+                        "enabled": self.api_enabled(),
+                        "key": self.api_key(),
+                        "allowCrossOrigin": self.api_allowCrossOrigin()
+                    },
+                    "appearance" : {
+                        "name": self.appearance_name(),
+                        "color": self.appearance_color(),
+                        "colorTransparent": self.appearance_colorTransparent(),
+                        "defaultLanguage": self.appearance_defaultLanguage()
+                    },
+                    "printer": {
+                        "defaultExtrusionLength": self.printer_defaultExtrusionLength()
+                    },
+                    "webcam": {
+                        "streamUrl": self.webcam_streamUrl(),
+                        "snapshotUrl": self.webcam_snapshotUrl(),
+                        "ffmpegPath": self.webcam_ffmpegPath(),
+                        "bitrate": self.webcam_bitrate(),
+                        "ffmpegThreads": self.webcam_ffmpegThreads(),
+                        "watermark": self.webcam_watermark(),
+                        "flipH": self.webcam_flipH(),
+                        "flipV": self.webcam_flipV(),
+                        "rotate90": self.webcam_rotate90()
+                    },
+                    "feature": {
+                        "gcodeViewer": self.feature_gcodeViewer(),
+                        "temperatureGraph": self.feature_temperatureGraph(),
+                        "waitForStart": self.feature_waitForStart(),
+                        "alwaysSendChecksum": self.feature_alwaysSendChecksum(),
+                        "sdSupport": self.feature_sdSupport(),
+                        "sdAlwaysAvailable": self.feature_sdAlwaysAvailable(),
+                        "swallowOkAfterResend": self.feature_swallowOkAfterResend(),
+                        "repetierTargetTemp": self.feature_repetierTargetTemp(),
+                        "externalHeatupDetection": !self.feature_disableExternalHeatupDetection(),
+                        "keyboardControl": self.feature_keyboardControl(),
+                        "pollWatched": self.feature_pollWatched()
+                    },
+                    "serial": {
+                        "port": self.serial_port(),
+                        "baudrate": self.serial_baudrate(),
+                        "autoconnect": self.serial_autoconnect(),
+                        "timeoutConnection": self.serial_timeoutConnection(),
+                        "timeoutDetection": self.serial_timeoutDetection(),
+                        "timeoutCommunication": self.serial_timeoutCommunication(),
+                        "timeoutTemperature": self.serial_timeoutTemperature(),
+                        "timeoutSdStatus": self.serial_timeoutSdStatus(),
+                        "log": self.serial_log(),
+                        "additionalPorts": commentableLinesToArray(self.serial_additionalPorts()),
+                        "longRunningCommands": splitTextToArray(self.serial_longRunningCommands(), ",", true)
+                    },
+                    "folder": {
+                        "uploads": self.folder_uploads(),
+                        "timelapse": self.folder_timelapse(),
+                        "timelapseTmp": self.folder_timelapseTmp(),
+                        "logs": self.folder_logs(),
+                        "watched": self.folder_watched()
+                    },
+                    "temperature": {
+                        "profiles": self.temperature_profiles(),
+                        "cutoff": self.temperature_cutoff()
+                    },
+                    "system": {
+                        "actions": self.system_actions()
+                    },
+                    "terminalFilters": self.terminalFilters(),
+                    "scripts": {
+                        "gcode": {
+                            "beforePrintStarted": self.scripts_gcode_beforePrintStarted(),
+                            "afterPrintDone": self.scripts_gcode_afterPrintDone(),
+                            "afterPrintCancelled": self.scripts_gcode_afterPrintCancelled(),
+                            "afterPrintPaused": self.scripts_gcode_afterPrintPaused(),
+                            "beforePrintResumed": self.scripts_gcode_beforePrintResumed(),
+                            "afterPrinterConnected": self.scripts_gcode_afterPrinterConnected()
+                        }
+                    },
+                    "server": {
+                        "commands": {
+                            "systemShutdownCommand": self.server_commands_systemShutdownCommand(),
+                            "systemRestartCommand": self.server_commands_systemRestartCommand(),
+                            "serverRestartCommand": self.server_commands_serverRestartCommand()
+                        }
                     }
-                }
-            });
+                });
+            }
 
             $.ajax({
                 url: API_BASEURL + "settings",
@@ -501,10 +555,23 @@ $(function() {
                 contentType: "application/json; charset=UTF-8",
                 data: JSON.stringify(data),
                 success: function(response) {
-                    self.fromResponse(response);
-                    self.settingsDialog.modal("hide");
+                    self.receiving(true);
+                    self.sending(false);
+                    try {
+                        self.fromResponse(response);
+                        if (successCallback) successCallback(response);
+                    } finally {
+                        self.receiving(false);
+                    }
+                },
+                error: function(xhr) {
+                    self.sending(false);
                 }
             });
+        };
+
+        self.onEventSettingsUpdated = function() {
+            self.requestData();
         };
     }
 

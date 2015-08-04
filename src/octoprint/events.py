@@ -74,6 +74,9 @@ class Events(object):
 	# Timelapse
 	CAPTURE_START = "CaptureStart"
 	CAPTURE_DONE = "CaptureDone"
+	CAPTURE_FAILED = "CaptureFailed"
+	POSTROLL_START = "PostRollStart"
+	POSTROLL_END = "PostRollEnd"
 	MOVIE_RENDERING = "MovieRendering"
 	MOVIE_DONE = "MovieDone"
 	MOVIE_FAILED = "MovieFailed"
@@ -254,10 +257,11 @@ class CommandTrigger(GenericEventListener):
 			event = subscription["event"]
 			command = subscription["command"]
 			commandType = subscription["type"]
+			debug = subscription["debug"] if "debug" in subscription else False
 
 			if not event in self._subscriptions.keys():
 				self._subscriptions[event] = []
-			self._subscriptions[event].append((command, commandType))
+			self._subscriptions[event].append((command, commandType, debug))
 
 			if not event in eventsToSubscribe:
 				eventsToSubscribe.append(event)
@@ -275,7 +279,7 @@ class CommandTrigger(GenericEventListener):
 		if not event in self._subscriptions:
 			return
 
-		for command, commandType in self._subscriptions[event]:
+		for command, commandType, debug in self._subscriptions[event]:
 			try:
 				if isinstance(command, (tuple, list, set)):
 					processedCommand = []
@@ -283,19 +287,23 @@ class CommandTrigger(GenericEventListener):
 						processedCommand.append(self._processCommand(c, payload))
 				else:
 					processedCommand = self._processCommand(command, payload)
-				self.executeCommand(processedCommand, commandType)
+				self.executeCommand(processedCommand, commandType, debug=debug)
 			except KeyError, e:
 				self._logger.warn("There was an error processing one or more placeholders in the following command: %s" % command)
 
-	def executeCommand(self, command, commandType):
+	def executeCommand(self, command, commandType, debug=False):
 		if commandType == "system":
-			self._executeSystemCommand(command)
+			self._executeSystemCommand(command, debug=debug)
 		elif commandType == "gcode":
-			self._executeGcodeCommand(command)
+			self._executeGcodeCommand(command, debug=debug)
 
-	def _executeSystemCommand(self, command):
+	def _executeSystemCommand(self, command, debug=False):
 		def commandExecutioner(command):
-			self._logger.info("Executing system command: %s" % command)
+			if debug:
+				self._logger.info("Executing system command: %s" % command)
+			# we run this with shell=True since we have to trust whatever
+			# our admin configured as command and since we want to allow
+			# shell-alike handling here...
 			subprocess.Popen(command, shell=True)
 
 		try:
@@ -306,16 +314,15 @@ class CommandTrigger(GenericEventListener):
 				commandExecutioner(command)
 		except subprocess.CalledProcessError, e:
 			self._logger.warn("Command failed with return code %i: %s" % (e.returncode, str(e)))
-		except Exception, ex:
+		except:
 			self._logger.exception("Command failed")
 
-	def _executeGcodeCommand(self, command):
+	def _executeGcodeCommand(self, command, debug=False):
 		commands = [command]
 		if isinstance(command, (list, tuple, set)):
-			self._logger.debug("Executing GCode commands: %r" % command)
 			commands = list(command)
-		else:
-			self._logger.debug("Executing GCode command: %s" % command)
+		if debug:
+			self._logger.info("Executing GCode commands: %r" % command)
 		self._printer.commands(commands)
 
 	def _processCommand(self, command, payload):

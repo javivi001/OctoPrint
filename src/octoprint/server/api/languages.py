@@ -90,10 +90,16 @@ def getInstalledLanguagePacks():
 def uploadLanguagePack():
 	input_name = "file"
 	input_upload_path = input_name + "." + settings().get(["server", "uploads", "pathSuffix"])
-	if not input_upload_path in request.values:
+	input_upload_name = input_name + "." + settings().get(["server", "uploads", "nameSuffix"])
+	if not input_upload_path in request.values or not input_upload_name in request.values:
 		return make_response("No file included", 400)
 
+	upload_name = request.values[input_upload_name]
 	upload_path = request.values[input_upload_path]
+
+	exts = filter(lambda x: upload_name.lower().endswith(x), (".zip", ".tar.gz", ".tgz", ".tar"))
+	if not len(exts):
+		return make_response("File doesn't have a valid extension for a plugin archive", 400)
 
 	target_path = settings().getBaseFolder("translations")
 
@@ -143,5 +149,5 @@ def _validate_archive_name(name):
 		raise InvalidLanguagePack("Provided language pack contains invalid name {name}".format(**locals()))
 
 
-class InvalidLanguagePack(BaseException):
+class InvalidLanguagePack(Exception):
 	pass

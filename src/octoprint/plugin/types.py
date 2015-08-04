@@ -69,9 +69,32 @@ class OctoPrintPlugin(Plugin):
 
 	   The :class:`~octoprint.server.LifecycleManager` instance. Injected by the plugin core system upon initialization
 	   of the implementation.
+
+	.. attribute:: _data_folder
+
+	   Path to the data folder for the plugin to use for any data it might have to persist. Should always be accessed
+	   through :meth:`get_plugin_data_folder` since that function will also ensure that the data folder actually exists
+	   and if not creating it before returning it. Injected by the plugin core system upon initialization of the
+	   implementation.
+
+    .. automethod:: get_plugin_data_folder
 	"""
 
-	pass
+	def get_plugin_data_folder(self):
+		"""
+		Retrieves the path to a data folder specifically for the plugin, ensuring it exists and if not creating it
+		before returning it.
+
+		Plugins may use this folder for storing additional data they need for their operation.
+		"""
+		if self._data_folder is None:
+			raise RuntimeError("self._plugin_data_folder is None, has the plugin been initialized yet?")
+
+		import os
+		if not os.path.isdir(self._data_folder):
+			os.makedirs(self._data_folder)
+		return self._data_folder
+
 
 class ReloadNeedingPlugin(Plugin):
 	pass
@@ -178,7 +201,7 @@ class TemplatePlugin(OctoPrintPlugin, ReloadNeedingPlugin):
 	"""
 	Using the ``TemplatePlugin`` mixin plugins may inject their own components into the OctoPrint web interface.
 
-	Currently OctoPrint supports the following types of injections:
+	Currently OctoPrint supports the following types of injections out of the box:
 
 	Navbar
 	   The right part of the navigation bar located at the top of the UI can be enriched with additional links. Note that
@@ -248,13 +271,16 @@ class TemplatePlugin(OctoPrintPlugin, ReloadNeedingPlugin):
 	Plugins may replace existing components, see the ``replaces`` keyword in the template configurations returned by
 	:meth:`.get_template_configs` below. Note that if a plugin replaces a core component, it is the plugin's
 	responsibility to ensure that all core functionality is still maintained.
+
+	Plugins can also add additional template types by implementing the :ref:`octoprint.ui.web.templatetypes <sec-plugins-hook-ui-web-templatetypes>` hook.
 	"""
 
 	def get_template_configs(self):
 		"""
-		Allows configuration of injected navbar, sidebar, tab and settings templates. Should be a list containing one
-		configuration object per template to inject. Each configuration object is represented by a dictionary which
-		may contain the following keys:
+		Allows configuration of injected navbar, sidebar, tab and settings templates (and also additional templates of
+		types specified by plugins through the :ref:`octoprint.ui.web.templatetypes <sec-plugins-hook-ui-web-templatetypes>` hook).
+		Should be a list containing one configuration object per template to inject. Each configuration object is
+		represented by a dictionary which may contain the following keys:
 
 		.. list-table::
 		   :widths: 5 95
@@ -715,7 +741,7 @@ class SettingsPlugin(OctoPrintPlugin):
 	       def on_settings_save(self, data):
 	           old_flag = self._settings.get_boolean(["sub", "some_flag"])
 
-	           super(MySettingsPlugin, self).on_settings_save(data)
+	           octoprint.plugin.SettingsPlugin.on_settings_save(self, data)
 
 	           new_flag = self._settings.get_boolean(["sub", "some_flag"])
 	           if old_flag != new_flag:
@@ -755,7 +781,10 @@ class SettingsPlugin(OctoPrintPlugin):
 
 		:return: the current settings of the plugin, as a dictionary
 		"""
-		return self._settings.get([], asdict=True, merged=True)
+		data = self._settings.get([], asdict=True, merged=True)
+		if "_config_version" in data:
+			del data["_config_version"]
+		return data
 
 	def on_settings_save(self, data):
 		"""
@@ -777,9 +806,12 @@ class SettingsPlugin(OctoPrintPlugin):
 		"""
 		import octoprint.util
 
+		if "_config_version" in data:
+			del data["_config_version"]
+
 		current = self._settings.get([], asdict=True, merged=True)
-		data = octoprint.util.dict_merge(current, data)
-		self._settings.set([], data)
+		merged = octoprint.util.dict_merge(current, data)
+		self._settings.set([], merged)
 
 	def get_settings_defaults(self):
 		"""
@@ -826,6 +858,50 @@ class SettingsPlugin(OctoPrintPlugin):
 		        getters, the second the preprocessors for setters
 		"""
 		return dict(), dict()
+
+	def get_settings_version(self):
+		"""
+		Retrieves the settings format version of the plugin.
+
+		Use this to have OctoPrint trigger your migration function if it detects an outdated settings version in
+		config.yaml.
+
+		Returns:
+		    int or None: an int signifying the current settings format, should be incremented by plugins whenever there
+		                 are backwards incompatible changes. Returning None here disables the version tracking for the
+		                 plugin's configuration.
+		"""
+		return None
+
+	def on_settings_migrate(self, target, current):
+		"""
+		Called by OctoPrint if it detects that the installed version of the plugin necessitates a higher settings version
+		than the one currently stored in _config.yaml. Will also be called if the settings data stored in config.yaml
+		doesn't have version information, in which case the ``current`` parameter will be None.
+
+		Your plugin's implementation should take care of migrating any data by utilizing self._settings. OctoPrint
+		will take care of saving any changes to disk by calling `self._settings.save()` after returning from this method.
+
+		This method will be called before your plugin's :func:`on_settings_initialized` method, with all injections already
+		having taken place. You can therefore depend on the configuration having been migrated by the time
+		:func:`on_settings_initialized` is called.
+
+		Arguments:
+		    target (int): The settings format version the plugin requires, this should always be the same value as
+		                  returned by :func:`get_settings_version`.
+		    current (int or None): The settings format version as currently stored in config.yaml. May be None if
+		                  no version information can be found.
+		"""
+		pass
+
+	def on_settings_initialized(self):
+		"""
+		Called after the settings have been initialized and - if necessary - also been migrated through a call to
+		func:`on_settings_migrate`.
+
+		This method will always be called after the `initialize` method.
+		"""
+		pass
 
 
 class EventHandlerPlugin(OctoPrintPlugin):
@@ -1035,25 +1111,13 @@ class AppPlugin(OctoPrintPlugin):
 	"""
 	Using the :class:`AppPlugin mixin` plugins may register additional :ref:`App session key providers <sec-api-apps-sessionkey>`
 	within the system.
+
+	.. deprecated:: 1.2.0
+
+	   Refer to the :ref:`octoprint.accesscontrol.appkey hook <sec-plugins-hook-accesscontrol-appkey>` instead.
+
 	"""
 
 	def get_additional_apps(self):
-		"""
-		Overrides this to return your additional app information to be used for validating app session keys. You'll
-		need to return a :class:`list` of 3-tuples of the format (id, version, public key).
-
-		The ``id`` should be the (unique) identifier of the app. Using a domain prefix might make sense here, e.g.
-		``org.octoprint.example.MyApp``.
-
-		``version`` should be a string specifying the version of the app for which the public key is valid. You can
-		provide the string ``any`` here, in which case the provided public key will be valid for all versions of the
-		app for which no specific public key is defined.
-
-		Finally, the public key is expected to be provided as a PKCS1 string without newlines.
-
-		Returns:
-		    list: A list of 3-tuples as described above.
-		"""
-
 		return []
 

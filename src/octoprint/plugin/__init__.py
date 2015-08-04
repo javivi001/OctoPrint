@@ -31,8 +31,20 @@ from octoprint.util import deprecated
 # singleton
 _instance = None
 
+def _validate_plugin(phase, plugin_info):
+	if phase == "after_load":
+		if plugin_info.implementation is not None and isinstance(plugin_info.implementation, AppPlugin):
+			# transform app plugin into hook
+			import warnings
+			warnings.warn("{name} uses deprecated plugin mixin AppPlugin, use octoprint.accesscontrol.appkey hook instead".format(name=plugin_info.key), DeprecationWarning)
+
+			hooks = plugin_info.hooks
+			if not "octoprint.accesscontrol.appkey" in hooks:
+				hooks["octoprint.accesscontrol.appkey"] = plugin_info.implementation.get_additional_apps
+			setattr(plugin_info.instance, PluginInfo.attr_hooks, hooks)
+
 def plugin_manager(init=False, plugin_folders=None, plugin_types=None, plugin_entry_points=None, plugin_disabled_list=None,
-                   plugin_restart_needing_hooks=None, plugin_obsolete_hooks=None):
+                   plugin_restart_needing_hooks=None, plugin_obsolete_hooks=None, plugin_validators=None):
 	"""
 	Factory method for initially constructing and consecutively retrieving the :class:`~octoprint.plugin.core.PluginManager`
 	singleton.
@@ -57,6 +69,7 @@ def plugin_manager(init=False, plugin_folders=None, plugin_types=None, plugin_en
 	        to logging handlers
 	    plugin_obsolete_hooks (list): A list of hooks that have been declared obsolete. Plugins implementing them will
 	        not be enabled since they might depend on functionality that is no longer available.
+	    plugin_validators (list): A list of additional plugin validators through which to process each plugin.
 
 	Returns:
 	    PluginManager: A fully initialized :class:`~octoprint.plugin.core.PluginManager` instance to be used for plugin
@@ -103,6 +116,10 @@ def plugin_manager(init=False, plugin_folders=None, plugin_types=None, plugin_en
 				plugin_obsolete_hooks = [
 					"octoprint.comm.protocol.gcode"
 				]
+			if plugin_validators is None:
+				plugin_validators = [
+					_validate_plugin
+				]
 
 			_instance = PluginManager(plugin_folders,
 			                          plugin_types,
@@ -110,7 +127,8 @@ def plugin_manager(init=False, plugin_folders=None, plugin_types=None, plugin_en
 			                          logging_prefix="octoprint.plugins.",
 			                          plugin_disabled_list=plugin_disabled_list,
 			                          plugin_restart_needing_hooks=plugin_restart_needing_hooks,
-			                          plugin_obsolete_hooks=plugin_obsolete_hooks)
+			                          plugin_obsolete_hooks=plugin_obsolete_hooks,
+			                          plugin_validators=plugin_validators)
 		else:
 			raise ValueError("Plugin Manager not initialized yet")
 	return _instance
@@ -263,6 +281,7 @@ class PluginSettings(object):
 			defaults = dict()
 		self.defaults = dict(plugins=dict())
 		self.defaults["plugins"][plugin_key] = defaults
+		self.defaults["plugins"][plugin_key]["_config_version"] = None
 
 		if get_preprocessors is None:
 			get_preprocessors = dict()
@@ -291,11 +310,17 @@ class PluginSettings(object):
 			return result
 
 		def add_getter_kwargs(kwargs):
-			kwargs.update(defaults=self.defaults, preprocessors=self.get_preprocessors)
+			if not "defaults" in kwargs:
+				kwargs.update(defaults=self.defaults)
+			if not "preprocessors" in kwargs:
+				kwargs.update(preprocessors=self.get_preprocessors)
 			return kwargs
 
 		def add_setter_kwargs(kwargs):
-			kwargs.update(defaults=self.defaults, preprocessors=self.set_preprocessors)
+			if not "defaults" in kwargs:
+				kwargs.update(defaults=self.defaults)
+			if not "preprocessors" in kwargs:
+				kwargs.update(preprocessors=self.set_preprocessors)
 			return kwargs
 
 		self.access_methods = dict(
@@ -401,6 +426,15 @@ class PluginSettings(object):
 		filename += ".log"
 		return os.path.join(self.settings.getBaseFolder("logs"), filename)
 
+	@deprecated("PluginSettings.get_plugin_data_folder has been replaced by OctoPrintPlugin.get_plugin_data_folder",
+	            includedoc="Replaced by :func:`~octoprint.plugin.types.OctoPrintPlugin.get_plugin_data_folder`",
+	            since="1.2.0")
+	def get_plugin_data_folder(self):
+		path = os.path.join(self.settings.getBaseFolder("data"), self.plugin_key)
+		if not os.path.isdir(path):
+			os.makedirs(path)
+		return path
+
 	def __getattr__(self, item):
 		all_access_methods = self.access_methods.keys() + self.deprecated_access_methods.keys()
 		if item in all_access_methods:
@@ -427,7 +461,7 @@ class PluginSettings(object):
 
 	##~~ deprecated methods follow
 
-	# TODO: Remove with release of 1.2.0
+	# TODO: Remove with release of 1.3.0
 
 	globalGet            = deprecated("globalGet has been renamed to global_get",
 	                                  includedoc="Replaced by :func:`global_get`",

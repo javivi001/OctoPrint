@@ -9,6 +9,11 @@ function DataUpdater(allViewModels) {
     self._autoReconnectTimeouts = [0, 1, 1, 2, 3, 5, 8, 13, 20, 40, 100];
     self._autoReconnectDialogIndex = 1;
 
+    self._pluginHash = undefined;
+
+    self.reloadOverlay = $("#reloadui_overlay");
+    $("#reloadui_overlay_reload").click(function() { location.reload(true); });
+
     self.connect = function() {
         var options = {};
         if (SOCKJS_DEBUG) {
@@ -119,6 +124,9 @@ function DataUpdater(allViewModels) {
                     DISPLAY_VERSION = data["display_version"];
                     $("span.version").text(DISPLAY_VERSION);
 
+                    var oldPluginHash = self._pluginHash;
+                    self._pluginHash = data["plugin_hash"];
+
                     if ($("#offline_overlay").is(":visible")) {
                         hideOfflineOverlay();
                         _.each(self.allViewModels, function(viewModel) {
@@ -132,13 +140,8 @@ function DataUpdater(allViewModels) {
                         }
                     }
 
-                    if (oldVersion != VERSION) {
-                        // version change detected, force reloading UI - use randomized delay to reduce server load in
-                        // the case of multiple clients
-                        var delay = 5 + Math.floor(Math.random() * 5) + 1;
-                        setTimeout(function() {location.reload(true);}, delay * 1000);
-
-                        // TODO notify about that, or show confirmation
+                    if (oldVersion != VERSION || (oldPluginHash != undefined && oldPluginHash != self._pluginHash)) {
+                        self.reloadOverlay.show();
                     }
 
                     break;
@@ -173,6 +176,7 @@ function DataUpdater(allViewModels) {
                     var type = data["type"];
                     var payload = data["payload"];
                     var html = "";
+                    var format = {};
 
                     log.debug("Got event " + type + " with payload: " + JSON.stringify(payload));
 
@@ -183,7 +187,23 @@ function DataUpdater(allViewModels) {
                     } else if (type == "MovieFailed") {
                         html = "<p>" + _.sprintf(gettext("Rendering of timelapse %(movie_basename)s failed with return code %(returncode)s"), payload) + "</p>";
                         html += pnotifyAdditionalInfo('<pre style="overflow: auto">' + payload.error + '</pre>');
-                        new PNotify({title: gettext("Rendering failed"), text: html, type: "error", hide: false});
+                        new PNotify({
+                            title: gettext("Rendering failed"),
+                            text: html,
+                            type: "error",
+                            hide: false
+                        });
+                    } else if (type == "PostRollStart") {
+                        if (payload.postroll_duration > 60) {
+                            format = {duration: _.sprintf(gettext("%(minutes)d min"), {minutes: payload.postroll_duration / 60})};
+                        } else {
+                            format = {duration: _.sprintf(gettext("%(seconds)d sec"), {seconds: payload.postroll_duration})};
+                        }
+
+                        new PNotify({
+                            title: gettext("Capturing timelapse postroll"),
+                            text: _.sprintf(gettext("Now capturing timelapse post roll, this will take approximately %(duration)s..."), format)
+                        });
                     } else if (type == "SlicingStarted") {
                         gcodeUploadProgress.addClass("progress-striped").addClass("active");
                         gcodeUploadProgressBar.css("width", "100%");

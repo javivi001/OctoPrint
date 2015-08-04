@@ -14,12 +14,14 @@ from flask.ext.babel import Babel, gettext, ngettext
 from flask.ext.assets import Environment, Bundle
 from babel import Locale
 from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 from collections import defaultdict
 
 import os
 import logging
 import logging.config
 import atexit
+import signal
 
 SUCCESS = {}
 NO_CONTENT = ("", 204)
@@ -39,6 +41,7 @@ eventManager = None
 loginManager = None
 pluginManager = None
 appSessionManager = None
+pluginLifecycleManager = None
 
 principals = Principal(app)
 admin_permission = Permission(RoleNeed("admin"))
@@ -138,6 +141,7 @@ class Server():
 		global loginManager
 		global pluginManager
 		global appSessionManager
+		global pluginLifecycleManager
 		global debug
 
 		from tornado.ioloop import IOLoop
@@ -194,7 +198,8 @@ class Server():
 				file_manager=fileManager,
 				printer=printer,
 				app_session_manager=appSessionManager,
-				plugin_lifecycle_manager=pluginLifecycleManager
+				plugin_lifecycle_manager=pluginLifecycleManager,
+				data_folder=os.path.join(settings().getBaseFolder("data"), name)
 			)
 
 		def settings_plugin_inject_factory(name, implementation):
@@ -208,8 +213,33 @@ class Server():
 			                                                   set_preprocessors=set_preprocessors)
 			return dict(settings=plugin_settings)
 
+		def settings_plugin_config_migration(name, implementation):
+			if not isinstance(implementation, octoprint.plugin.SettingsPlugin):
+				return
+
+			settings_version = implementation.get_settings_version()
+			settings_migrator = implementation.on_settings_migrate
+
+			if settings_version is not None and settings_migrator is not None:
+				stored_version = implementation._settings.get_int(["_config_version"])
+				if stored_version is None or stored_version < settings_version:
+					settings_migrator(settings_version, stored_version)
+					implementation._settings.set_int(["_config_version"], settings_version)
+					implementation._settings.save()
+
+			implementation.on_settings_initialized()
+
 		pluginManager.implementation_inject_factories=[octoprint_plugin_inject_factory, settings_plugin_inject_factory]
 		pluginManager.initialize_implementations()
+
+		settingsPlugins = pluginManager.get_implementations(octoprint.plugin.SettingsPlugin)
+		for implementation in settingsPlugins:
+			try:
+				settings_plugin_config_migration(implementation._identifier, implementation)
+			except:
+				self._logger.exception("Error while trying to migrate settings for plugin {}, ignoring it".format(implementation._identifier))
+
+		pluginManager.implementation_post_inits=[settings_plugin_config_migration]
 
 		pluginManager.log_all_plugins()
 
@@ -373,7 +403,12 @@ class Server():
 				printer.connect(port=port, baudrate=baudrate, profile=printer_profile["id"] if "id" in printer_profile else "_default")
 
 		# start up watchdogs
-		observer = Observer()
+		if s.getBoolean(["feature", "pollWatched"]):
+			# use less performant polling observer if explicitely configured
+			observer = PollingObserver()
+		else:
+			# use os default
+			observer = Observer()
 		observer.schedule(util.watchdog.GcodeWatchdogHandler(fileManager, printer), s.getBaseFolder("watched"))
 		observer.start()
 
@@ -415,16 +450,27 @@ class Server():
 
 		# prepare our shutdown function
 		def on_shutdown():
-			self._logger.info("Goodbye!")
+			# will be called on clean system exit and shutdown the watchdog observer and call the on_shutdown methods
+			# on all registered ShutdownPlugins
+			self._logger.info("Shutting down...")
 			observer.stop()
 			observer.join()
 			octoprint.plugin.call_plugin(octoprint.plugin.ShutdownPlugin,
 			                             "on_shutdown")
+			self._logger.info("Goodbye!")
 		atexit.register(on_shutdown)
 
+		def sigterm_handler(*args, **kwargs):
+			# will stop tornado on SIGTERM, making the program exit cleanly
+			def shutdown_tornado():
+				ioloop.stop()
+			ioloop.add_callback_from_signal(shutdown_tornado)
+		signal.signal(signal.SIGTERM, sigterm_handler)
+
 		try:
+			# this is the main loop - as long as tornado is running, OctoPrint is running
 			ioloop.start()
-		except KeyboardInterrupt:
+		except (KeyboardInterrupt, SystemExit):
 			pass
 		except:
 			self._logger.fatal("Now that is embarrassing... Something really really went wrong here. Please report this including the stacktrace below in OctoPrint's bugtracker. Thanks!")
@@ -501,6 +547,9 @@ class Server():
 				},
 				"tornado.general": {
 					"level": "INFO"
+				},
+				"octoprint.server.util.flask": {
+					"level": "WARN"
 				}
 			},
 			"root": {
@@ -574,6 +623,7 @@ class Server():
 
 	def _setup_jinja2(self):
 		app.jinja_env.add_extension("jinja2.ext.do")
+		app.jinja_env.add_extension("octoprint.server.util.jinja.trycatch")
 
 		# configure additional template folders for jinja2
 		import jinja2
@@ -592,7 +642,10 @@ class Server():
 	def _register_template_plugins(self):
 		template_plugins = pluginManager.get_implementations(octoprint.plugin.TemplatePlugin)
 		for plugin in template_plugins:
-			self._register_additional_template_plugin(plugin)
+			try:
+				self._register_additional_template_plugin(plugin)
+			except:
+				self._logger.exception("Error while trying to register templates of plugin {}, ignoring it".format(plugin._identifier))
 
 	def _register_additional_template_plugin(self, plugin):
 		folder = plugin.get_template_folder()
@@ -606,7 +659,7 @@ class Server():
 
 	def _setup_blueprints(self):
 		from octoprint.server.api import api
-		from octoprint.server.apps import apps
+		from octoprint.server.apps import apps, clear_registered_app
 		import octoprint.server.views
 
 		app.register_blueprint(api, url_prefix="/api")
@@ -618,17 +671,31 @@ class Server():
 		# and register a blueprint for serving the static files of asset plugins which are not blueprint plugins themselves
 		self._register_asset_plugins()
 
+		global pluginLifecycleManager
+		def clear_apps(name, plugin):
+			clear_registered_app()
+		pluginLifecycleManager.add_callback("enabled", clear_apps)
+		pluginLifecycleManager.add_callback("disabled", clear_apps)
+
 	def _register_blueprint_plugins(self):
 		blueprint_plugins = octoprint.plugin.plugin_manager().get_implementations(octoprint.plugin.BlueprintPlugin)
 		for plugin in blueprint_plugins:
-			self._register_blueprint_plugin(plugin)
+			try:
+				self._register_blueprint_plugin(plugin)
+			except:
+				self._logger.exception("Error while registering blueprint of plugin {}, ignoring it".format(plugin._identifier))
+				continue
 
 	def _register_asset_plugins(self):
 		asset_plugins = octoprint.plugin.plugin_manager().get_implementations(octoprint.plugin.AssetPlugin)
 		for plugin in asset_plugins:
 			if isinstance(plugin, octoprint.plugin.BlueprintPlugin):
 				continue
-			self._register_asset_plugin(plugin)
+			try:
+				self._register_asset_plugin(plugin)
+			except:
+				self._logger.exception("Error while registering assets of plugin {}, ignoring it".format(plugin._identifier))
+				continue
 
 	def _register_blueprint_plugin(self, plugin):
 		name = plugin._identifier
@@ -663,8 +730,23 @@ class Server():
 		global pluginManager
 
 		util.flask.fix_webassets_cache()
+		util.flask.fix_webassets_filtertool()
 
 		base_folder = settings().getBaseFolder("generated")
+
+		# clean the folder
+		if settings().getBoolean(["devel", "webassets", "clean_on_startup"]):
+			import shutil
+			for entry in ("webassets", ".webassets-cache"):
+				path = os.path.join(base_folder, entry)
+				self._logger.debug("Deleting {path}...".format(**locals()))
+				if os.path.isdir(path):
+					shutil.rmtree(path, ignore_errors=True)
+				elif os.path.isfile(path):
+					try:
+						os.remove(path)
+					except:
+						self._logger.exception("Exception while trying to delete {entry} from {base_folder}".format(**locals()))
 
 		AdjustedEnvironment = type(Environment)(Environment.__name__, (Environment,), dict(
 			resolver_class=util.flask.PluginAssetResolver
@@ -677,9 +759,15 @@ class Server():
 		assets = CustomDirectoryEnvironment(app)
 		assets.debug = not settings().getBoolean(["devel", "webassets", "bundle"])
 
+		UpdaterType = type(util.flask.SettingsCheckUpdater)(util.flask.SettingsCheckUpdater.__name__, (util.flask.SettingsCheckUpdater,), dict(
+			updater=assets.updater
+		))
+		assets.updater = UpdaterType
+
 		enable_gcodeviewer = settings().getBoolean(["gcodeViewer", "enabled"])
 		enable_timelapse = (settings().get(["webcam", "snapshot"]) and settings().get(["webcam", "ffmpeg"]))
 		preferred_stylesheet = settings().get(["devel", "stylesheet"])
+		minify = settings().getBoolean(["devel", "webassets", "minify"])
 
 		dynamic_assets = util.flask.collect_plugin_assets(
 			enable_gcodeviewer=enable_gcodeviewer,
@@ -688,7 +776,7 @@ class Server():
 		)
 
 		js_libs = [
-			"js/lib/jquery/jquery.min.js",
+			"js/lib/jquery/jquery-2.1.4.min.js" if minify else "js/lib/jquery/jquery-2.1.4.js",
 			"js/lib/modernizr.custom.js",
 			"js/lib/lodash.min.js",
 			"js/lib/sprintf.min.js",
@@ -741,17 +829,7 @@ class Server():
 		if len(less_app) == 0:
 			less_app = ["empty"]
 
-		js_libs_bundle = Bundle(*js_libs, output="webassets/packed_libs.js")
-		if settings().getBoolean(["devel", "webassets", "minify"]):
-			js_app_bundle = Bundle(*js_app, output="webassets/package_app.js", filters="rjsmin")
-		else:
-			js_app_bundle = Bundle(*js_app, output="webassets/package_app.js")
-		all_js_bundle = Bundle(js_libs_bundle, js_app_bundle, output="webassets/packed.js")
-
-		css_libs_bundle = Bundle(*css_libs, output="webassets/packed_libs.css")
-		css_app_bundle = Bundle(*css_app, output="webassets/packed_app.css")
-
-		from webassets.filter import register_filter
+		from webassets.filter import register_filter, Filter
 		from webassets.filter.cssrewrite.base import PatternRewriter
 		import re
 		class LessImportRewrite(PatternRewriter):
@@ -770,13 +848,31 @@ class Server():
 
 				return "{import_with_options}\"{import_url}\";".format(**locals())
 
+		class JsDelimiterBundle(Filter):
+			name = "js_delimiter_bundler"
+			options = {}
+			def input(self, _in, out, **kwargs):
+				out.write(_in.read())
+				out.write("\n;\n")
+
 		register_filter(LessImportRewrite)
+		register_filter(JsDelimiterBundle)
 
-		all_css_bundle = Bundle(css_libs_bundle, css_app_bundle, output="webassets/packed.css")
-		all_less_bundle = Bundle(*less_app, output="webassets/packed.less", filters="less_importrewrite")
+		js_libs_bundle = Bundle(*js_libs, output="webassets/packed_libs.js", filters="js_delimiter_bundler")
+		if minify:
+			js_app_bundle = Bundle(*js_app, output="webassets/packed_app.js", filters="rjsmin, js_delimiter_bundler")
+		else:
+			js_app_bundle = Bundle(*js_app, output="webassets/packed_app.js", filters="js_delimiter_bundler")
 
-		assets.register("all_js", all_js_bundle)
-		assets.register("all_css", all_css_bundle)
+		css_libs_bundle = Bundle(*css_libs, output="webassets/packed_libs.css")
+		css_app_bundle = Bundle(*css_app, output="webassets/packed_app.css", filters="cssrewrite")
+
+		all_less_bundle = Bundle(*less_app, output="webassets/packed_app.less", filters="cssrewrite, less_importrewrite")
+
+		assets.register("js_libs", js_libs_bundle)
+		assets.register("js_app", js_app_bundle)
+		assets.register("css_libs", css_libs_bundle)
+		assets.register("css_app", css_app_bundle)
 		assets.register("less_app", all_less_bundle)
 
 

@@ -352,9 +352,7 @@ def silent_remove(file):
 def sanitize_ascii(line):
 	if not isinstance(line, basestring):
 		raise ValueError("Expected either str or unicode but got {} instead".format(line.__class__.__name__ if line is not None else None))
-	if isinstance(line, str):
-		line = unicode(line, 'ascii', 'replace')
-	return line.encode('ascii', 'replace').rstrip()
+	return to_unicode(line, encoding="ascii", errors="replace").rstrip()
 
 
 def filter_non_ascii(line):
@@ -369,10 +367,26 @@ def filter_non_ascii(line):
 	"""
 
 	try:
-		unicode(line, 'ascii').encode('ascii')
+		to_str(to_unicode(line, encoding="ascii"), encoding="ascii")
 		return False
 	except ValueError:
 		return True
+
+
+def to_str(s_or_u, encoding="utf-8", errors="strict"):
+	"""Make sure ``s_or_u`` is a str."""
+	if isinstance(s_or_u, unicode):
+		return s_or_u.encode(encoding, errors=errors)
+	else:
+		return s_or_u
+
+
+def to_unicode(s_or_u, encoding="utf-8", errors="strict"):
+	"""Make sure ``s_or_u`` is a unicode string."""
+	if isinstance(s_or_u, str):
+		return s_or_u.decode(encoding, errors=errors)
+	else:
+		return s_or_u
 
 
 def dict_merge(a, b):
@@ -556,9 +570,13 @@ class RepeatedTimer(threading.Thread):
 	    run_first (boolean): If set to True, the function will be run for the first time *before* the first wait period.
 	        If set to False (the default), the function will be run for the first time *after* the first wait period.
 	    condition (callable): Condition that needs to be True for loop to continue. Defaults to ``lambda: True``.
+	    on_finish (callable): Callback to call when the timer finishes, either due to being cancelled or since
+	        the condition became false.
+	    daemon (bool): daemon flag to set on underlying thread.
 	"""
 
-	def __init__(self, interval, function, args=None, kwargs=None, run_first=False, condition=None):
+	def __init__(self, interval, function, args=None, kwargs=None,
+	             run_first=False, condition=None, on_finish=None, daemon=True):
 		threading.Thread.__init__(self)
 
 		if args is None:
@@ -579,9 +597,11 @@ class RepeatedTimer(threading.Thread):
 		self.kwargs = kwargs
 		self.run_first = run_first
 		self.condition = condition
+		self.on_finish = on_finish
+		self.daemon = daemon
 
 	def cancel(self):
-		self.finished.set()
+		self.finish()
 
 	def run(self):
 		while self.condition():
@@ -602,8 +622,13 @@ class RepeatedTimer(threading.Thread):
 				# if we are to run the function AFTER waiting for the first time
 				self.function(*self.args, **self.kwargs)
 
+		self.finish()
+
+	def finish(self):
 		# make sure we set our finished event so we can detect that the loop was finished
 		self.finished.set()
+		if callable(self.on_finish):
+			self.on_finish()
 
 
 class CountedEvent(object):
