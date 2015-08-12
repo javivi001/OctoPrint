@@ -250,13 +250,13 @@ def setSettings():
 		if "actions" in data["system"].keys(): s.set(["system", "actions"], data["system"]["actions"])
 		if "events" in data["system"].keys(): s.set(["system", "events"], data["system"]["events"])
 
-	if "scripts" in data:
-		if "gcode" in data["scripts"] and isinstance(data["scripts"]["gcode"], dict):
-			for name, script in data["scripts"]["gcode"].items():
-				if name == "snippets":
-					continue
-				s.saveScript("gcode", name, script.replace("\r\n", "\n").replace("\r", "\n"))
-
+#	if "scripts" in data:
+#		if "gcode" in data["scripts"] and isinstance(data["scripts"]["gcode"], dict):
+#			for name, script in data["scripts"]["gcode"].items():
+#				if name == "snippets":
+#					continue
+#				s.saveScript("gcode", name, script.replace("\r\n", "\n").replace("\r", "\n"))
+#
 	if "server" in data:
 		if "commands" in data["server"]:
 			if "systemShutdownCommand" in data["server"]["commands"].keys(): s.set(["server", "commands", "systemShutdownCommand"], data["server"]["commands"]["systemShutdownCommand"])
