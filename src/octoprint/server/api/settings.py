@@ -84,7 +84,10 @@ def getSettings():
 			"timeoutSdStatus": s.getFloat(["serial", "timeout", "sdStatus"]),
 			"log": s.getBoolean(["serial", "log"]),
 			"additionalPorts": s.get(["serial", "additionalPorts"]),
-			"longRunningCommands": s.get(["serial", "longRunningCommands"])
+			"additionalBaudrates": s.get(["serial", "additionalBaudrates"]),
+			"longRunningCommands": s.get(["serial", "longRunningCommands"]),
+			"checksumRequiringCommands": s.get(["serial", "checksumRequiringCommands"]),
+			"helloCommand": s.get(["serial", "helloCommand"])
 		},
 		"folder": {
 			"uploads": s.getBaseFolder("uploads"),
@@ -105,6 +108,7 @@ def getSettings():
 		"scripts": {
 			"gcode": {
 				"afterPrinterConnected": None,
+				"beforePrinterDisconnected": None,
 				"beforePrintStarted": None,
 				"afterPrintCancelled": None,
 				"afterPrintDone": None,
@@ -219,7 +223,10 @@ def setSettings():
 		if "timeoutTemperature" in data["serial"].keys(): s.setFloat(["serial", "timeout", "temperature"], data["serial"]["timeoutTemperature"])
 		if "timeoutSdStatus" in data["serial"].keys(): s.setFloat(["serial", "timeout", "sdStatus"], data["serial"]["timeoutSdStatus"])
 		if "additionalPorts" in data["serial"] and isinstance(data["serial"]["additionalPorts"], (list, tuple)): s.set(["serial", "additionalPorts"], data["serial"]["additionalPorts"])
+		if "additionalBaudrates" in data["serial"] and isinstance(data["serial"]["additionalBaudrates"], (list, tuple)): s.set(["serial", "additionalBaudrates"], data["serial"]["additionalBaudrates"])
 		if "longRunningCommands" in data["serial"] and isinstance(data["serial"]["longRunningCommands"], (list, tuple)): s.set(["serial", "longRunningCommands"], data["serial"]["longRunningCommands"])
+		if "checksumRequiringCommands" in data["serial"] and isinstance(data["serial"]["checksumRequiringCommands"], (list, tuple)): s.set(["serial", "checksumRequiringCommands"], data["serial"]["checksumRequiringCommands"])
+		if "helloCommand" in data["serial"]: s.set(["serial", "helloCommand"], data["serial"]["helloCommand"])
 
 		oldLog = s.getBoolean(["serial", "log"])
 		if "log" in data["serial"].keys(): s.setBoolean(["serial", "log"], data["serial"]["log"])
@@ -278,7 +285,11 @@ def setSettings():
 					logger.exception("Could not save settings for plugin {name} ({version})".format(version=plugin._plugin_version, name=plugin._plugin_name))
 
 	if s.save():
-		eventManager().fire(Events.SETTINGS_UPDATED)
+		payload = dict(
+			config_hash=s.config_hash,
+			effective_hash=s.effective_hash
+		)
+		eventManager().fire(Events.SETTINGS_UPDATED, payload=payload)
 
 	return getSettings()
 
