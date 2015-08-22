@@ -6,18 +6,11 @@ $(function() {
         self.users = parameters[1];
         self.printerProfiles = parameters[2];
 
+        self.allViewModels = [];
+
         self.receiving = ko.observable(false);
         self.sending = ko.observable(false);
         self.callbacks = [];
-
-        self.api_enabled = ko.observable(undefined);
-        self.api_key = ko.observable(undefined);
-        self.api_allowCrossOrigin = ko.observable(undefined);
-
-        self.appearance_name = ko.observable(undefined);
-        self.appearance_color = ko.observable(undefined);
-        self.appearance_colorTransparent = ko.observable();
-        self.appearance_defaultLanguage = ko.observable();
 
         self.settingsDialog = undefined;
         self.settings_dialog_update_detected = undefined;
@@ -96,6 +89,15 @@ $(function() {
         })));
         self.locale_languages = _.keys(AVAILABLE_LOCALES);
 
+        self.api_enabled = ko.observable(undefined);
+        self.api_key = ko.observable(undefined);
+        self.api_allowCrossOrigin = ko.observable(undefined);
+
+        self.appearance_name = ko.observable(undefined);
+        self.appearance_color = ko.observable(undefined);
+        self.appearance_colorTransparent = ko.observable();
+        self.appearance_defaultLanguage = ko.observable();
+
         self.printer_defaultExtrusionLength = ko.observable(undefined);
 
         self.webcam_streamUrl = ko.observable(undefined);
@@ -165,6 +167,15 @@ $(function() {
         self.settings = undefined;
         self.lastReceivedSettings = undefined;
 
+        self.webcam_ffmpegPathText = ko.observable();
+        self.webcam_ffmpegPathOk = ko.observable(false);
+        self.webcam_ffmpegPathBroken = ko.observable(false);
+        self.webcam_ffmpegPathReset = function() {
+            self.webcam_ffmpegPathText("");
+            self.webcam_ffmpegPathOk(false);
+            self.webcam_ffmpegPathBroken(false);
+        };
+
         self.addTemperatureProfile = function() {
             self.temperature_profiles.push({name: "New", extruder:0, bed:0});
         };
@@ -181,8 +192,121 @@ $(function() {
             self.terminalFilters.remove(filter);
         };
 
+        self.testWebcamStreamUrl = function() {
+            if (!self.webcam_streamUrl()) {
+                return;
+            }
+
+            var text = gettext("If you see your webcam stream below, the entered stream URL is ok.");
+            var image = $('<img src="' + self.webcam_streamUrl() + '">');
+            var message = $("<p></p>")
+                .append(text)
+                .append(image);
+            showMessageDialog({
+                title: gettext("Stream test"),
+                message: message
+            });
+        };
+
+        self.testWebcamSnapshotUrl = function(viewModel, event) {
+            if (!self.webcam_snapshotUrl()) {
+                return;
+            }
+
+            var target = $(event.target);
+            target.prepend('<i class="icon-spinner icon-spin"></i> ');
+
+            var errorText = gettext("Could not retrieve snapshot URL, please double check the URL");
+            var errorTitle = gettext("Snapshot test failed");
+            $.ajax({
+                url: API_BASEURL + "util/test",
+                type: "POST",
+                dataType: "json",
+                data: JSON.stringify({
+                    command: "url",
+                    url: self.webcam_snapshotUrl(),
+                    method: "GET",
+                    response: true
+                }),
+                contentType: "application/json; charset=UTF-8",
+                success: function(response) {
+                    $("i.icon-spinner", target).remove();
+
+                    if (!response.result) {
+                        showMessageDialog({
+                            title: errorTitle,
+                            message: errorText
+                        });
+                        return;
+                    }
+
+                    var content = response.response.content;
+                    var mimeType = "image/jpeg";
+
+                    var headers = response.response.headers;
+                    if (headers && headers["mime-type"]) {
+                        mimeType = headers["mime-type"];
+                    }
+
+                    var text = gettext("If you see your webcam snapshot picture below, the entered snapshot URL is ok.");
+                    showMessageDialog({
+                        title: gettext("Snapshot test"),
+                        message: $('<p>' + text + '</p><p><img src="data:' + mimeType + ';base64,' + content + '" /></p>')
+                    });
+                },
+                error: function() {
+                    $("i.icon-spinner", target).remove();
+                    showMessageDialog({
+                        title: errorTitle,
+                        message: errorText
+                    });
+                }
+            });
+        };
+
+        self.testWebcamFfmpegPath = function() {
+            if (!self.webcam_ffmpegPath()) {
+                return;
+            }
+
+            var successCallback = function(response) {
+                if (!response.result) {
+                    if (!response.exists) {
+                        self.webcam_ffmpegPathText(gettext("The path doesn't exist"));
+                    } else if (!response.typeok) {
+                        self.webcam_ffmpegPathText(gettext("The path is not a file"));
+                    } else if (!response.access) {
+                        self.webcam_ffmpegPathText(gettext("The path is not an executable"));
+                    }
+                } else {
+                    self.webcam_ffmpegPathText(gettext("The path is valid"));
+                }
+                self.webcam_ffmpegPathOk(response.result);
+                self.webcam_ffmpegPathBroken(!response.result);
+            };
+
+            var path = self.webcam_ffmpegPath();
+            $.ajax({
+                url: API_BASEURL + "util/test",
+                type: "POST",
+                dataType: "json",
+                data: JSON.stringify({
+                    command: "path",
+                    path: path,
+                    check_type: "file",
+                    check_access: "x"
+                }),
+                contentType: "application/json; charset=UTF-8",
+                success: successCallback
+            })
+        };
+
         self.onSettingsShown = function() {
             self.requestData();
+        };
+
+        self.onSettingsHidden = function() {
+            self.webcam_ffmpegPathReset();
         };
 
         self.isDialogActive = function() {
@@ -226,31 +350,21 @@ $(function() {
         };
 
         self.onAllBound = function(allViewModels) {
+            self.allViewModels = allViewModels;
+
             self.settingsDialog.on('show', function(event) {
                 if (event.target.id == "settings_dialog") {
                     self.requestTranslationData();
-                    _.each(allViewModels, function(viewModel) {
-                        if (viewModel.hasOwnProperty("onSettingsShown")) {
-                            viewModel.onSettingsShown();
-                        }
-                    });
+                    callViewModels(allViewModels, "onSettingsShown");
                 }
             });
             self.settingsDialog.on('hidden', function(event) {
                 if (event.target.id == "settings_dialog") {
-                    _.each(allViewModels, function(viewModel) {
-                        if (viewModel.hasOwnProperty("onSettingsHidden")) {
-                            viewModel.onSettingsHidden();
-                        }
-                    });
+                    callViewModels(allViewModels, "onSettingsHidden");
                 }
             });
             self.settingsDialog.on('beforeSave', function () {
-                _.each(allViewModels, function (viewModel) {
-                    if (viewModel.hasOwnProperty("onSettingsBeforeSave")) {
-                        viewModel.onSettingsBeforeSave();
-                    }
-                });
+                callViewModels(allViewModels, "onSettingsBeforeSave");
             });
 
             $(".reload_all", self.settingsUpdatedDialog).click(function(e) {
@@ -398,101 +512,67 @@ $(function() {
             })
         };
 
-        self._getLocalData = function() {
+        /**
+         * Fetches the settings as currently stored in this client instance.
+         */
+        self.getLocalData = function() {
             var data = {};
             if (self.settings != undefined) {
                 data = ko.mapping.toJS(self.settings);
             }
 
-            data = _.extend(data, {
-                "api" : {
-                    "enabled": self.api_enabled(),
-                    "key": self.api_key(),
-                    "allowCrossOrigin": self.api_allowCrossOrigin()
+            // some special read functions for various observables
+            var specialMappings = {
+                feature: {
+                    externalHeatupDetection: function() { return !self.feature_disableExternalHeatupDetection() }
                 },
-                "appearance" : {
-                    "name": self.appearance_name(),
-                    "color": self.appearance_color(),
-                    "colorTransparent": self.appearance_colorTransparent(),
-                    "defaultLanguage": self.appearance_defaultLanguage()
-                },
-                "printer": {
-                    "defaultExtrusionLength": self.printer_defaultExtrusionLength()
-                },
-                "webcam": {
-                    "streamUrl": self.webcam_streamUrl(),
-                    "snapshotUrl": self.webcam_snapshotUrl(),
-                    "ffmpegPath": self.webcam_ffmpegPath(),
-                    "bitrate": self.webcam_bitrate(),
-                    "ffmpegThreads": self.webcam_ffmpegThreads(),
-                    "watermark": self.webcam_watermark(),
-                    "flipH": self.webcam_flipH(),
-                    "flipV": self.webcam_flipV(),
-                    "rotate90": self.webcam_rotate90()
-                },
-                "feature": {
-                    "gcodeViewer": self.feature_gcodeViewer(),
-                    "temperatureGraph": self.feature_temperatureGraph(),
-                    "waitForStart": self.feature_waitForStart(),
-                    "alwaysSendChecksum": self.feature_alwaysSendChecksum(),
-                    "sdSupport": self.feature_sdSupport(),
-                    "sdAlwaysAvailable": self.feature_sdAlwaysAvailable(),
-                    "swallowOkAfterResend": self.feature_swallowOkAfterResend(),
-                    "repetierTargetTemp": self.feature_repetierTargetTemp(),
-                    "externalHeatupDetection": !self.feature_disableExternalHeatupDetection(),
-                    "keyboardControl": self.feature_keyboardControl(),
-                    "pollWatched": self.feature_pollWatched()
-                },
-                "serial": {
-                    "port": self.serial_port(),
-                    "baudrate": self.serial_baudrate(),
-                    "autoconnect": self.serial_autoconnect(),
-                    "timeoutConnection": self.serial_timeoutConnection(),
-                    "timeoutDetection": self.serial_timeoutDetection(),
-                    "timeoutCommunication": self.serial_timeoutCommunication(),
-                    "timeoutTemperature": self.serial_timeoutTemperature(),
-                    "timeoutSdStatus": self.serial_timeoutSdStatus(),
-                    "log": self.serial_log(),
-                    "additionalPorts": commentableLinesToArray(self.serial_additionalPorts()),
-                    "additionalBaudrates": _.map(splitTextToArray(self.serial_additionalBaudrates(), ",", true, function(item) { return !isNaN(parseInt(item)); }), function(item) { return parseInt(item); }),
-                    "longRunningCommands": splitTextToArray(self.serial_longRunningCommands(), ",", true),
-                    "checksumRequiringCommands": splitTextToArray(self.serial_checksumRequiringCommands(), ",", true),
-                    "helloCommand": self.serial_helloCommand()
-                },
-                "folder": {
-                    "uploads": self.folder_uploads(),
-                    "timelapse": self.folder_timelapse(),
-                    "timelapseTmp": self.folder_timelapseTmp(),
-                    "logs": self.folder_logs(),
-                    "watched": self.folder_watched()
-                },
-                "temperature": {
-                    "profiles": self.temperature_profiles(),
-                    "cutoff": self.temperature_cutoff()
-                },
-                "system": {
-                    "actions": self.system_actions()
-                },
-                "terminalFilters": self.terminalFilters(),
-                "scripts": {
-                    "gcode": {
-                        "beforePrintStarted": self.scripts_gcode_beforePrintStarted(),
-                        "afterPrintDone": self.scripts_gcode_afterPrintDone(),
-                        "afterPrintCancelled": self.scripts_gcode_afterPrintCancelled(),
-                        "afterPrintPaused": self.scripts_gcode_afterPrintPaused(),
-                        "beforePrintResumed": self.scripts_gcode_beforePrintResumed(),
-                        "afterPrinterConnected": self.scripts_gcode_afterPrinterConnected(),
-                        "beforePrinterDisconnected": self.scripts_gcode_beforePrinterDisconnected()
-                    }
-                },
-                "server": {
-                    "commands": {
-                        "systemShutdownCommand": self.server_commands_systemShutdownCommand(),
-                        "systemRestartCommand": self.server_commands_systemRestartCommand(),
-                        "serverRestartCommand": self.server_commands_serverRestartCommand()
-                    }
+                serial: {
+                    additionalPorts : function() { return commentableLinesToArray(self.serial_additionalPorts()) },
+                    additionalBaudrates: function() { return _.map(splitTextToArray(self.serial_additionalBaudrates(), ",", true, function(item) { return !isNaN(parseInt(item)); }), function(item) { return parseInt(item); }) },
+                    longRunningCommands: function() { return splitTextToArray(self.serial_longRunningCommands(), ",", true) },
+                    checksumRequiringCommands: function() { return splitTextToArray(self.serial_checksumRequiringCommands(), ",", true) }
                 }
-            });
+            };
+
+            var mapFromObservables = function(data, mapping, keyPrefix) {
+                var flag = false;
+                var result = {};
+
+                // process all key-value-pairs here
+                _.forOwn(data, function(value, key) {
+                    var observable = key;
+                    if (keyPrefix != undefined) {
+                        observable = keyPrefix + "_" + observable;
+                    }
+
+                    if (_.isPlainObject(value)) {
+                        // value is another object, we'll dive deeper
+                        var subresult = mapFromObservables(value, (mapping && mapping[key]) ? mapping[key] : undefined, observable);
+                        if (subresult != undefined) {
+                            // we only set something on our result if we got something back
+                            result[key] = subresult;
+                            flag = true;
+                        }
+                    } else {
+                        // if we have a custom read function for this, we'll use it
+                        if (mapping && mapping[key] && _.isFunction(mapping[key])) {
+                            result[key] = mapping[key]();
+                            flag = true;
+                        } else if (self.hasOwnProperty(observable)) {
+                            result[key] = self[observable]();
+                            flag = true;
+                        }
+                    }
+                });
+
+                // if we set something on our result (flag is true), we return result, else we return undefined
+                return flag ? result : undefined;
+            };
+
+            // map local observables based on our existing data
+            var dataFromObservables = mapFromObservables(data, specialMappings);
+
+            data = _.extend(data, dataFromObservables);
             return data;
         };
 
@@ -506,7 +586,7 @@ $(function() {
             if (local) {
                 // local is true, so we'll keep all local changes and only update what's been updated server side
                 serverChangedData = getOnlyChangedData(response, self.lastReceivedSettings);
-                clientChangedData = getOnlyChangedData(self._getLocalData(), self.lastReceivedSettings);
+                clientChangedData = getOnlyChangedData(self.getLocalData(), self.lastReceivedSettings);
             } else  {
                 // local is false or unset, so we'll forcefully update with the settings from the server
                 serverChangedData = response;
@@ -548,6 +628,7 @@ $(function() {
                     return;
                 }
 
+                // process all key-value-pairs here
                 _.forOwn(data, function(value, key) {
                     var observable = key;
                     if (keyPrefix != undefined) {
@@ -563,15 +644,13 @@ $(function() {
                             return;
                         }
 
-                        // applying the value usually means we'll call the observable with it
-                        var apply = function(v) { if (self.hasOwnProperty(observable)) { self[observable](v) } };
-
-                        // if we have a custom apply function for this, we'll use it instead
                         if (mapping && mapping[key] && _.isFunction(mapping[key])) {
-                            apply = mapping[key];
+                            // if we have a custom apply function for this, we'll use it
+                            mapping[key](value);
+                        } else if (self.hasOwnProperty(observable)) {
+                            // else if we have a matching observable, we'll use that
+                            self[observable](value);
                         }
-
-                        apply(value);
                     }
                 });
             };
@@ -586,8 +665,8 @@ $(function() {
                 // we only set sending to true when we didn't include data
                 self.sending(true);
 
-                // we also only sent data that actually changed when no data is specified
-                data = getOnlyChangedData(self._getLocalData(), self.lastReceivedSettings);
+                // we also only send data that actually changed when no data is specified
+                data = getOnlyChangedData(self.getLocalData(), self.lastReceivedSettings);
             }
 
             $.ajax({
@@ -613,18 +692,39 @@ $(function() {
         };
 
         self.onEventSettingsUpdated = function() {
+            var preventSettingsRefresh = _.any(self.allViewModels, function(viewModel) {
+                if (viewModel.hasOwnProperty("onSettingsPreventRefresh")) {
+                    try {
+                        return viewModel["onSettingsPreventRefresh"]();
+                    } catch (e) {
+                        log.warn("Error while calling onSettingsPreventRefresh on", viewModel, ":", e);
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            });
+
+            if (preventSettingsRefresh) {
+                // if any of our viewmodels prevented this refresh, we'll just return now
+                return;
+            }
+
             if (self.isDialogActive()) {
+                // dialog is open and not currently busy...
                 if (self.sending() || self.receiving()) {
                     return;
                 }
 
-                if (!hasDataChanged(self._getLocalData(), self.lastReceivedSettings)) {
+                if (!hasDataChanged(self.getLocalData(), self.lastReceivedSettings)) {
+                    // we don't have local changes, so just fetch new data
                     self.requestData();
-                    return;
+                } else {
+                    // we have local changes, show update dialog
+                    self.settingsUpdatedDialog.modal("show");
                 }
-
-                self.settingsUpdatedDialog.modal("show");
             } else {
+                // dialog is not open, just fetch new data
                 self.requestData();
             }
         };

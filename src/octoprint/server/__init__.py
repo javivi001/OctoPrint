@@ -186,6 +186,15 @@ class Server():
 		appSessionManager = util.flask.AppSessionManager()
 		pluginLifecycleManager = LifecycleManager(pluginManager)
 
+		# setup access control
+		if s.getBoolean(["accessControl", "enabled"]):
+			userManagerName = s.get(["accessControl", "userManager"])
+			try:
+				clazz = octoprint.util.get_class(userManagerName)
+				userManager = clazz()
+			except AttributeError, e:
+				self._logger.exception("Could not instantiate user manager %s, will run with accessControl disabled!" % userManagerName)
+
 		def octoprint_plugin_inject_factory(name, implementation):
 			if not isinstance(implementation, octoprint.plugin.OctoPrintPlugin):
 				return None
@@ -199,7 +208,8 @@ class Server():
 				printer=printer,
 				app_session_manager=appSessionManager,
 				plugin_lifecycle_manager=pluginLifecycleManager,
-				data_folder=os.path.join(settings().getBaseFolder("data"), name)
+				data_folder=os.path.join(settings().getBaseFolder("data"), name),
+				user_manager=userManager
 			)
 
 		def settings_plugin_inject_factory(name, implementation):
@@ -274,15 +284,6 @@ class Server():
 		events.CommandTrigger(printer)
 		if self._debug:
 			events.DebugEventListener()
-
-		# setup access control
-		if s.getBoolean(["accessControl", "enabled"]):
-			userManagerName = s.get(["accessControl", "userManager"])
-			try:
-				clazz = octoprint.util.get_class(userManagerName)
-				userManager = clazz()
-			except AttributeError, e:
-				self._logger.exception("Could not instantiate user manager %s, will run with accessControl disabled!" % userManagerName)
 
 		app.wsgi_app = util.ReverseProxied(
 			app.wsgi_app,
@@ -807,13 +808,11 @@ class Server():
 		assets.updater = UpdaterType
 
 		enable_gcodeviewer = settings().getBoolean(["gcodeViewer", "enabled"])
-		enable_timelapse = (settings().get(["webcam", "snapshot"]) and settings().get(["webcam", "ffmpeg"]))
 		preferred_stylesheet = settings().get(["devel", "stylesheet"])
 		minify = settings().getBoolean(["devel", "webassets", "minify"])
 
 		dynamic_assets = util.flask.collect_plugin_assets(
 			enable_gcodeviewer=enable_gcodeviewer,
-			enable_timelapse=enable_timelapse,
 			preferred_stylesheet=preferred_stylesheet
 		)
 
@@ -839,6 +838,7 @@ class Server():
 			"js/lib/jquery/jquery.fileupload.js",
 			"js/lib/jquery/jquery.slimscroll.min.js",
 			"js/lib/jquery/jquery.qrcode.min.js",
+			"js/lib/jquery/jquery.bootstrap.wizard.js",
 			"js/lib/moment-with-locales.min.js",
 			"js/lib/pusher.color.min.js",
 			"js/lib/detectmobilebrowser.js",
